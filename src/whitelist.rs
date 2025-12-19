@@ -44,10 +44,10 @@ impl Default for Whitelist {
     fn default() -> Self {
         // 默认白名单，包含一些常见的合法 SIP User-Agent
         Self::new(vec![
-            "friendly-scanner".to_string(),
-            "sipcli".to_string(),
-            "asterisk".to_string(),
             "freeswitch".to_string(),
+            "microsip".to_string(),
+            "telephone".to_string(),
+            "jssip".to_string(),
         ])
     }
 }

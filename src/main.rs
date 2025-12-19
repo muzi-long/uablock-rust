@@ -183,23 +183,19 @@ fn main() {
 /// 初始化白名单
 fn initialize_whitelist() -> Whitelist {
     // 可以从环境变量或配置文件读取
-    let patterns = if let Ok(whitelist_env) = std::env::var("SIP_UA_WHITELIST") {
-        whitelist_env
+    let whitelist = if let Ok(whitelist_env) = std::env::var("SIP_UA_WHITELIST") {
+        let patterns = whitelist_env
             .split(',')
             .map(|s| s.trim().to_string())
-            .collect()
+            .collect();
+        Whitelist::new(patterns)
     } else {
-        // 默认白名单
-        vec![
-            "freeswitch".to_string(),
-            "microsip".to_string(),
-            "telephone".to_string(),
-            "jssip".to_string(),
-        ]
+        // 使用 Default trait 的默认白名单
+        Whitelist::default()
     };
 
-    info!("白名单模式: {:?}", patterns);
-    Whitelist::new(patterns)
+    info!("白名单模式: {:?}", whitelist.get_patterns());
+    whitelist
 }
 
 /// 检查是否有 root 权限
