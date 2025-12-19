@@ -126,7 +126,7 @@ SIP_UA_WHITELIST="friendly-scanner,sipcli,asterisk,freeswitch" sudo ./target/rel
 ### 3. 白名单检查
 
 - 检查 User-Agent 是否在白名单中（支持模糊匹配）
-- 默认白名单包含：`friendly-scanner`, `sipcli`, `asterisk`, `freeswitch`, `linphone`, `microsip`
+- 默认白名单包含：`freeswitch`, `microsip`, `telephone`, `jssip`
 
 ### 4. 封禁/解封逻辑
 
@@ -145,19 +145,17 @@ SIP_UA_WHITELIST="friendly-scanner,sipcli,asterisk,freeswitch" sudo ./target/rel
 
 程序内置以下默认白名单模式：
 
-- `friendly-scanner`
-- `sipcli`
-- `asterisk`
 - `freeswitch`
-- `linphone`
 - `microsip`
+- `telephone`
+- `jssip`
 
 ### 自定义白名单
 
 #### 方法 1：环境变量
 
 ```bash
-export SIP_UA_WHITELIST="your-ua1,your-ua2,your-ua3"
+export SIP_UA_WHITELIST="freeswitch,microsip,telephone,jssip"
 sudo ./target/release/uablock-rust
 ```
 
