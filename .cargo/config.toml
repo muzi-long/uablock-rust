@@ -1,0 +1,8 @@
+# 交叉编译配置
+# 如果需要自定义链接器，可以在这里配置
+
+[target.x86_64-unknown-linux-gnu]
+# 使用 cross 时，链接器会自动配置
+# 如果手动编译，可能需要设置：
+# linker = "x86_64-linux-gnu-gcc"
+

@@ -1,0 +1,16 @@
+[package]
+name = "uablock-rust"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pcap = "1.1"
+regex = "1.10"
+log = "0.4"
+env_logger = "0.11"
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+anyhow = "1.0"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
