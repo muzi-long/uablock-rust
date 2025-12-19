@@ -9,7 +9,8 @@ pub struct PacketCapture {
 
 impl PacketCapture {
     /// 打开网络接口进行抓包
-    pub fn open(interface: &str) -> Result<Self, String> {
+    /// port: 目标端口，只捕获目标端口为该端口的入站流量
+    pub fn open(interface: &str, port: u16) -> Result<Self, String> {
         let mut cap = Capture::from_device(interface)
             .map_err(|e| format!("无法打开网络接口 {}: {}", interface, e))?
             .promisc(true)
@@ -18,8 +19,10 @@ impl PacketCapture {
             .open()
             .map_err(|e| format!("无法开始抓包: {}", e))?;
 
-        // 设置过滤器，只捕获 UDP 流量（SIP 通常使用 UDP）
-        cap.filter("udp", true)
+        // 设置过滤器，只捕获目标端口为指定端口的 UDP 入站流量
+        // dst port 确保只捕获入站流量（目标端口匹配）
+        let filter = format!("udp and dst port {}", port);
+        cap.filter(&filter, true)
             .map_err(|e| format!("设置过滤器失败: {}", e))?;
 
         Ok(Self { capture: Some(cap) })

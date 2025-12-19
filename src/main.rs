@@ -40,7 +40,7 @@ fn main() {
     info!("封禁端口: {}", block_port);
 
     // 初始化组件
-    let mut capture = match PacketCapture::open(&interface) {
+    let mut capture = match PacketCapture::open(&interface, block_port) {
         Ok(cap) => cap,
         Err(e) => {
             error!("无法打开网络接口: {}", e);
