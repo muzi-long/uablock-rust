@@ -2,47 +2,30 @@ use log::{debug, error, info, warn};
 use std::net::IpAddr;
 use std::process::Command;
 
-/// iptables 管理器，用于封禁和解封 IP
+/// iptables 管理器，用于封禁和解封 IP（封禁该 IP 的所有流量）
 pub struct IptablesManager {
     chain_name: String,
-    block_port: Option<u16>,
 }
 
 impl IptablesManager {
     pub fn new(chain_name: Option<String>) -> Self {
-        Self::new_with_port(chain_name, None)
-    }
-
-    pub fn new_with_port(chain_name: Option<String>, block_port: Option<u16>) -> Self {
         Self {
             chain_name: chain_name.unwrap_or_else(|| "INPUT".to_string()),
-            block_port,
         }
     }
 
-    /// 检查 IP 是否已被封禁
+    /// 检查 IP 是否已被封禁（检查是否存在针对该 IP 的 DROP 规则）
     pub fn is_blocked(&self, ip: &IpAddr) -> bool {
         // 先尝试使用 -C 检查（更快速）
         let ip_str = ip.to_string();
-        let mut args: Vec<String> = vec![
+        let args: Vec<String> = vec![
             "-C".to_string(),
             self.chain_name.clone(),
             "-s".to_string(),
             ip_str.clone(),
+            "-j".to_string(),
+            "DROP".to_string(),
         ];
-
-        // 如果指定了端口，添加端口限制
-        if let Some(port) = self.block_port {
-            let port_str = port.to_string();
-            args.extend_from_slice(&[
-                "-p".to_string(),
-                "udp".to_string(),
-                "--dport".to_string(),
-                port_str,
-            ]);
-        }
-
-        args.extend_from_slice(&["-j".to_string(), "DROP".to_string()]);
 
         let output = Command::new("iptables").args(&args).output();
 
@@ -62,22 +45,11 @@ impl IptablesManager {
                 let ip_str = ip.to_string();
 
                 for line in output_str.lines() {
+                    // 检查是否是针对该 IP 的完整封禁规则（不限制协议和端口）
+                    // 规则格式类似: "1    DROP       all  --  192.168.1.100        0.0.0.0/0"
                     if line.contains(&ip_str) && line.contains("DROP") {
-                        // 如果指定了端口，检查端口是否匹配
-                        if let Some(port) = self.block_port {
-                            // 检查端口号（数字格式：dpt:5060）
-                            // 或者服务名称（sip 对应 5060）
-                            let port_match = line.contains(&format!("dpt:{}", port))
-                                || line.contains(&port.to_string())
-                                || (port == 5060
-                                    && (line.contains("dpt:sip") || line.contains("sip")));
-
-                            if port_match {
-                                debug!("在规则中找到匹配的封禁规则: {}", line);
-                                return true;
-                            }
-                        } else {
-                            // 没有指定端口，只要包含 IP 和 DROP 就认为被封禁
+                        // 检查是否是封禁所有流量（协议为 all 或者没有端口限制）
+                        if line.contains("all") || (!line.contains("dpt:") && !line.contains("spt:")) {
                             debug!("在规则中找到匹配的封禁规则: {}", line);
                             return true;
                         }
@@ -93,32 +65,22 @@ impl IptablesManager {
         }
     }
 
-    /// 封禁 IP
+    /// 封禁 IP 的所有流量
     pub fn block_ip(&self, ip: &IpAddr) -> Result<(), String> {
         if self.is_blocked(ip) {
             debug!("IP {} 已经被封禁", ip);
             return Ok(());
         }
         let ip_str = ip.to_string();
-        let mut args: Vec<String> = vec![
+        // 封禁该 IP 的所有流量，不限制协议和端口
+        let args: Vec<String> = vec![
             "-A".to_string(),
             self.chain_name.clone(),
             "-s".to_string(),
             ip_str.clone(),
+            "-j".to_string(),
+            "DROP".to_string(),
         ];
-
-        // 如果指定了端口，添加端口限制
-        if let Some(port) = self.block_port {
-            let port_str = port.to_string();
-            args.extend_from_slice(&[
-                "-p".to_string(),
-                "udp".to_string(),
-                "--dport".to_string(),
-                port_str,
-            ]);
-        }
-
-        args.extend_from_slice(&["-j".to_string(), "DROP".to_string()]);
 
         debug!("执行 iptables 命令: iptables {}", args.join(" "));
         let output = Command::new("iptables").args(&args).output();
@@ -126,11 +88,7 @@ impl IptablesManager {
         match output {
             Ok(result) => {
                 if result.status.success() {
-                    let port_info = self
-                        .block_port
-                        .map(|p| format!("端口 {}", p))
-                        .unwrap_or_else(|| "所有端口".to_string());
-                    info!("成功封禁 IP: {} {}", ip, port_info);
+                    info!("成功封禁 IP: {}（所有流量）", ip);
 
                     // 验证规则是否真的被添加
                     if !self.is_blocked(ip) {
@@ -195,18 +153,12 @@ impl IptablesManager {
             }
         };
 
-        // 查找匹配的规则行号
+        // 查找匹配的规则行号（封禁所有流量的规则）
         let target_ip = ip.to_string();
         for line in line_numbers.lines() {
             if line.contains(&target_ip) && line.contains("DROP") {
-                // 如果指定了端口，检查端口是否匹配
-                let port_matches = if let Some(port) = self.block_port {
-                    line.contains(&port.to_string())
-                } else {
-                    true
-                };
-
-                if port_matches {
+                // 检查是否是封禁所有流量的规则
+                if line.contains("all") || (!line.contains("dpt:") && !line.contains("spt:")) {
                     if let Some(line_num) = line.split_whitespace().next() {
                         if let Ok(num) = line_num.parse::<u32>() {
                             // 删除规则
@@ -236,22 +188,14 @@ impl IptablesManager {
 
         // 如果找不到规则，尝试直接删除（可能规则格式不同）
         let ip_str = ip.to_string();
-        let mut delete_args: Vec<String> = vec![
+        let delete_args: Vec<String> = vec![
             "-D".to_string(),
             self.chain_name.clone(),
             "-s".to_string(),
             ip_str,
+            "-j".to_string(),
+            "DROP".to_string(),
         ];
-        if let Some(port) = self.block_port {
-            let port_str = port.to_string();
-            delete_args.extend_from_slice(&[
-                "-p".to_string(),
-                "udp".to_string(),
-                "--dport".to_string(),
-                port_str,
-            ]);
-        }
-        delete_args.extend_from_slice(&["-j".to_string(), "DROP".to_string()]);
 
         let output = Command::new("iptables").args(&delete_args).output();
 

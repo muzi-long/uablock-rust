@@ -1,8 +1,10 @@
+mod geoip;
 mod iptables_manager;
 mod packet_capture;
 mod sip_parser;
 mod whitelist;
 
+use geoip::GeoIpChecker;
 use iptables_manager::IptablesManager;
 use log::{debug, error, info, warn};
 use packet_capture::PacketCapture;
@@ -12,9 +14,18 @@ use std::time::{Duration, Instant};
 use whitelist::Whitelist;
 
 fn main() {
-    // 初始化日志（默认使用 Debug 级别以便调试）
+    // 先检查帮助参数（不需要 root 权限）
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "-h" || a == "--help") {
+        print_usage(&args[0]);
+        std::process::exit(0);
+    }
+
+    // 初始化日志
+    // 对本程序使用 Debug 级别，对第三方库使用 Warn 级别（避免 maxminddb 等库输出大量调试信息）
     env_logger::Builder::from_default_env()
-        .filter_level(log::LevelFilter::Debug)
+        .filter_level(log::LevelFilter::Warn) // 第三方库默认 Warn
+        .filter_module("uablock_rust", log::LevelFilter::Debug) // 本程序 Debug
         .init();
 
     info!("SIP UA 封禁工具启动");
@@ -26,21 +37,96 @@ fn main() {
         std::process::exit(1);
     }
 
-    // 配置参数
-    let args: Vec<String> = std::env::args().collect();
-    let interface = args
-        .get(1)
-        .map(|s| s.clone())
-        .unwrap_or_else(|| "eth0".to_string());
+    // 解析参数
+    let mut interface = "eth0".to_string();
+    let mut ports: Vec<u16> = vec![5060];
+    let mut geoip_enabled = false;
+    let mut ua_filter_enabled = false;
+    let mut geoip_db_path: Option<String> = None;
 
-    // 第二个参数是端口，默认 5060
-    let block_port: u16 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(5060);
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-i" | "--interface" => {
+                if i + 1 < args.len() {
+                    interface = args[i + 1].clone();
+                    i += 2;
+                } else {
+                    eprintln!("错误: {} 需要一个参数", args[i]);
+                    std::process::exit(1);
+                }
+            }
+            "-p" | "--ports" => {
+                if i + 1 < args.len() {
+                    ports = args[i + 1]
+                        .split(',')
+                        .filter_map(|p| p.trim().parse().ok())
+                        .collect();
+                    i += 2;
+                } else {
+                    eprintln!("错误: {} 需要一个参数", args[i]);
+                    std::process::exit(1);
+                }
+            }
+            "-g" | "--geoip" => {
+                geoip_enabled = true;
+                // 检查下一个参数是否是数据库路径（不以 - 开头）
+                if i + 1 < args.len() && !args[i + 1].starts_with('-') {
+                    geoip_db_path = Some(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            "-u" | "--ua" => {
+                ua_filter_enabled = true;
+                i += 1;
+            }
+            _ => {
+                eprintln!("未知参数: {}", args[i]);
+                print_usage(&args[0]);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // 如果两个过滤器都没有启用，默认启用 UA 过滤
+    if !geoip_enabled && !ua_filter_enabled {
+        info!("未指定过滤模式，默认启用 UA 过滤");
+        ua_filter_enabled = true;
+    }
+
+    // 初始化 GeoIP 检查器
+    let geoip_checker: Option<GeoIpChecker> = if geoip_enabled {
+        let checker = if let Some(ref db_path) = geoip_db_path {
+            GeoIpChecker::new(db_path)
+        } else {
+            GeoIpChecker::default()
+        };
+
+        if checker.is_available() {
+            info!("GeoIP 过滤已启用：非中国 IP 将被直接封禁");
+            Some(checker)
+        } else {
+            warn!("GeoIP 过滤已请求但数据库不可用，将跳过地理位置检查");
+            None
+        }
+    } else {
+        info!("GeoIP 过滤未启用");
+        None
+    };
+
+    if ua_filter_enabled {
+        info!("UA 过滤已启用：UA 不在白名单中的 IP 将被封禁");
+    } else {
+        info!("UA 过滤未启用");
+    }
 
     info!("使用网络接口: {}", interface);
-    info!("封禁端口: {}", block_port);
+    info!("监听端口: {:?}", ports);
 
     // 初始化组件
-    let mut capture = match PacketCapture::open(&interface, block_port) {
+    let mut capture = match PacketCapture::open(&interface, &ports) {
         Ok(cap) => cap,
         Err(e) => {
             error!("无法打开网络接口: {}", e);
@@ -50,7 +136,8 @@ fn main() {
     };
 
     let parser = SipParser::new();
-    let iptables = IptablesManager::new_with_port(None, Some(block_port));
+    // 封禁IP的所有流量，不限制端口
+    let iptables = IptablesManager::new(None);
 
     // 初始化白名单（可以从配置文件或环境变量读取）
     let whitelist = Arc::new(Mutex::new(initialize_whitelist()));
@@ -71,6 +158,59 @@ fn main() {
                     // 只有解析到 SIP REGISTER 或 INVITE 请求才会到这里
 
                     let ip_str = sip_request.source_ip.to_string();
+
+                    // 如果启用了 GeoIP 过滤，先检查是否是中国 IP
+                    if let Some(ref geoip) = geoip_checker {
+                        if !geoip.is_china_ip(&sip_request.source_ip) {
+                            // 不是中国 IP，直接封禁，不检查 UA
+                            let is_blocked = iptables.is_blocked(&sip_request.source_ip);
+                            if !is_blocked {
+                                let country = geoip
+                                    .get_country_code(&sip_request.source_ip)
+                                    .unwrap_or_else(|| "Unknown".to_string());
+                                warn!(
+                                    "【封禁】IP: {}, 国家: {}, 原因: 非中国 IP（跳过 UA 检查）",
+                                    sip_request.source_ip, country
+                                );
+                                match iptables.block_ip(&sip_request.source_ip) {
+                                    Ok(_) => {
+                                        info!(
+                                            "【封禁成功】IP: {}, 国家: {}",
+                                            sip_request.source_ip, country
+                                        );
+                                    }
+                                    Err(e) => {
+                                        error!(
+                                            "【封禁失败】IP: {}, 国家: {}, 错误: {}",
+                                            sip_request.source_ip, country, e
+                                        );
+                                    }
+                                }
+                            } else {
+                                debug!(
+                                    "IP {} 是非中国 IP，已被封禁，无需重复封禁",
+                                    sip_request.source_ip
+                                );
+                            }
+                            // 记录处理时间并跳过后续 UA 检查
+                            let mut last_processed_guard = last_processed.lock().unwrap();
+                            last_processed_guard.insert(ip_str, Instant::now());
+                            continue;
+                        }
+                    }
+
+                    // 如果未启用 UA 过滤，跳过后续 UA 检查
+                    if !ua_filter_enabled {
+                        debug!(
+                            "UA 过滤未启用，跳过 UA 检查，IP: {}, UA: '{}'",
+                            sip_request.source_ip, sip_request.user_agent
+                        );
+                        let mut last_processed_guard = last_processed.lock().unwrap();
+                        last_processed_guard.insert(ip_str, Instant::now());
+                        continue;
+                    }
+
+                    // 中国 IP 或未启用 GeoIP，继续检查 UA
                     let whitelist_guard = whitelist.lock().unwrap();
                     let is_allowed = whitelist_guard.is_allowed(&sip_request.user_agent);
                     drop(whitelist_guard);
@@ -209,4 +349,37 @@ fn is_root() -> bool {
         // Windows 或其他系统，可能需要不同的检查方式
         true
     }
+}
+
+/// 打印使用说明
+fn print_usage(program: &str) {
+    eprintln!(
+        "SIP UA 封禁工具 - 基于 User-Agent 和 GeoIP 的 SIP 流量过滤
+
+用法: {} [选项]
+
+选项:
+  -i, --interface <接口>    网络接口名称 (默认: eth0)
+  -p, --ports <端口列表>    监听端口，逗号分隔 (默认: 5060)
+  -g, --geoip [数据库路径]  启用 GeoIP 过滤，非中国 IP 直接封禁
+  -u, --ua                  启用 UA 过滤，UA 不在白名单中则封禁
+  -h, --help                显示帮助信息
+
+过滤模式:
+  - 不指定 -g 和 -u: 默认启用 UA 过滤
+  - 仅 -g: 仅启用 GeoIP 过滤
+  - 仅 -u: 仅启用 UA 过滤
+  - -g -u: 同时启用，先 GeoIP 过滤，再 UA 过滤
+
+示例:
+  {} -i eth0 -p 5060 -u                    # 仅 UA 过滤
+  {} -i eth0 -p 5060 -g                    # 仅 GeoIP 过滤
+  {} -i eth0 -p 5060 -g -u                 # 同时启用
+  {} -i eth0 -p 5060,5080 -g /path/to/GeoLite2-Country.mmdb -u
+
+环境变量:
+  SIP_UA_WHITELIST    UA 白名单，逗号分隔 (默认: freeswitch,microsip,telephone,jssip)
+  RUST_LOG            日志级别 (默认: debug)",
+        program, program, program, program, program
+    );
 }

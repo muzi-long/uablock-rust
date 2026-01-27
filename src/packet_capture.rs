@@ -9,8 +9,8 @@ pub struct PacketCapture {
 
 impl PacketCapture {
     /// 打开网络接口进行抓包
-    /// port: 目标端口，只捕获目标端口为该端口的入站流量
-    pub fn open(interface: &str, port: u16) -> Result<Self, String> {
+    /// ports: 目标端口列表，只捕获目标端口在列表中的入站流量
+    pub fn open(interface: &str, ports: &[u16]) -> Result<Self, String> {
         let mut cap = Capture::from_device(interface)
             .map_err(|e| format!("无法打开网络接口 {}: {}", interface, e))?
             .promisc(true)
@@ -19,9 +19,20 @@ impl PacketCapture {
             .open()
             .map_err(|e| format!("无法开始抓包: {}", e))?;
 
-        // 设置过滤器，只捕获目标端口为指定端口的 UDP 入站流量
+        // 设置过滤器，只捕获目标端口在列表中的 UDP 入站流量
         // dst port 确保只捕获入站流量（目标端口匹配）
-        let filter = format!("udp and dst port {}", port);
+        let filter = if ports.is_empty() {
+            // 如果没有指定端口，默认监听 5060
+            "udp and dst port 5060".to_string()
+        } else if ports.len() == 1 {
+            format!("udp and dst port {}", ports[0])
+        } else {
+            // 多个端口使用 or 连接
+            let port_filters: Vec<String> = ports.iter().map(|p| format!("dst port {}", p)).collect();
+            format!("udp and ({})", port_filters.join(" or "))
+        };
+
+        debug!("BPF 过滤器: {}", filter);
         cap.filter(&filter, true)
             .map_err(|e| format!("设置过滤器失败: {}", e))?;
 

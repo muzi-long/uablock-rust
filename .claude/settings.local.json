@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo check:*)",
+      "Bash(cargo run:*)",
+      "Bash(rustup target:*)",
+      "Bash(cargo install:*)",
+      "Bash(cargo build:*)",
+      "Bash(git add:*)"
+    ]
+  }
+}
